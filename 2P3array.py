@@ -10,15 +10,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import math as m
 from scipy.optimize import fsolve
+from scipy.optimize import curve_fit
 import csv
 import time
 import sys
 
 #%% INPUTS
 #INPUT DATA FILE NAME HERE
-name = "16-12_39_54, Disconnect, VK second tests"
+name = "Control 1 random"
 fmt = ".csv"
-svname = "Disconnect"
+#INPUT NAME OF SAVED PNG YOU WANT
+svname = "Control 1 random"
 svnameav = svname + " avg"
 
 #INPUT DISPLACEMENTS AND TRACKSPEED HERE
@@ -35,12 +37,28 @@ guess1 = 50
 guess2 = 25
 guess3 = 0.01
 
+#INPUT DEFAULT LINEAR GUESS HERE:
+lingrad = -5
+linintcpt = 50
+
 #INPUT TOO HIGH OR TOO LOW BOUNDS FOR PREDICTION HERE
 upbnd = 70
 lbnd = 30
 
 #AND MAXMIMUM TOLERATED JUMP IN TEMPERATURE
 maxjump = 10
+
+#ADD WEIGHT AS DECIMAL FRACTION OF SOLUTION DETERMINED BY LINEAR FIT (initial)
+setting = 0.5
+
+#FRACTION OF NET DELTA TO ABS DELTA BEFORE MACHING TRIES LEARNING
+netabsfrac = 0.333
+
+#INITIAL DIRECTION FOR SELF IMPROVEMENT ALGORITHM, True for try to decrease linear input and vice versa
+declin = True
+
+#TEMP THAT HEATER MUST BE SWITCHED BACK ON, & TARGET TEMP
+heat = 40
 #%% Startup
 outputname = svname + "results.csv"
 avoutname = svname + "resultsavgd.csv"
@@ -64,11 +82,21 @@ vald = raw[:,6]
 
 inx = 0
 
+#jump logs
+chnginx = np.empty(0)
+settinglog = np.empty(0)
+jumplog = np.empty(0)
+
+#swtich on off logs
+heaterswitch = np.empty(0)
+
 res = np.empty((0,3))
 #print(res)
 
 solution = np.array([guess1, guess2, guess3])
 guess_mast = np.array([guess1, guess2, guess3])
+linguess_mast = np.array([lingrad, linintcpt ])
+setting_mast = setting
 
 #%% Begin Loop
 for v in vald:
@@ -449,7 +477,67 @@ for v in vald:
     except Exception:
         print("couldn't reset solution4")
         pass
-#%% appending array
+#%% linear fit solving
+    def fun(x, M, K):
+        return  M * (x/v) + K
+    xvals = np.array([a, b, c, d, e, f])
+    yvals = np.array([A, B, C, D, E, F])
+    try:
+        linguess = linguess_mast
+        opt, acc = curve_fit(fun, xvals, yvals, p0=linguess)
+        #print("G, L, k:", opt)
+        
+        Th = opt[1]
+        Tc = 25
+        k = 0.01
+        print("Th, Tc, k:", Th, " ", Tc, " ", k)
+        solutionlin = np.array([Th, Tc, k])
+        
+        print("trial values linear fit solution [T_h, T_c, k]: ", solutionlin)
+    except Exception:
+        print("error: linear solving")
+        pass
+#%% Linear Fit Reduce Jump
+    inx1 = inx - 1
+    try:
+        if inx > 0:
+            jump = solutionlin[0] - res[inx1,0]
+            if abs(jump)>maxjump and abs(jump)<1000 and solutionlin[0]<100 and solutionlin[0]>20:
+                jumpreduce = True
+            else: jumpreduce = False
+            while abs(jump)>maxjump and abs(jump)<1000 and solutionlin[0]<100 and solutionlin[0]>20:
+                if jump>0:
+                    solutionlin[0] -= 1
+                    jump = solutionlin[0] - res[inx1,0]
+                    print("jump reduce: ", jump)
+                if jump<0:
+                    solutionlin[0] += 1
+                    jump = solutionlin[0] - res[inx1,0]
+                    print("jump reduce: ", jump)
+            if jumpreduce == True:
+                print("jump reduced Th: ", solutionlin[0])
+    except Exception:
+        print("Error Reducing Jump")
+        pass
+#%% Linear fit anomalous reset
+    inx1 = inx - 1   
+    '''
+    if solution[2]>10 or solution[2]<-10:
+        solution[2] = guess3
+        print("RESET K")
+
+    if solution[1]>100 or solution[1]<0:
+        solution[1] = guess2
+        print("RESET Tc")
+    '''
+    try:
+        if solutionlin[0]>100 or solutionlin[0]<20:
+            solutionlin[0] = res[inx1,0]
+            print("RESET Th", solution4[0])
+    except Exception:
+        print("couldn't reset solutionlin")
+        pass
+#%% Weighting Solution Line
     #print(type(solution[0]))
     #print(solution[0])
     #print(type(solution2[0]))
@@ -470,13 +558,70 @@ for v in vald:
     except Exception:
         print("could not add solution4")
         pass
-    pred = np.mean(solutionset)
+    nums = np.mean(solutionset)
+    try:
+        solutions = np.array([nums, solutionlin[0]])
+    except Exception:
+        print("could not add solutionlin")
+        pass
+    weightlin = setting
+    weightnum = 1 - weightlin
+    pred = weightlin * solutionlin[0] + weightnum * nums
+#%% appending array
     val = vald[inx]
     delta = pred - val
     resline = np.array([pred, val, delta])
     print(resline)
     #print(np.shape(resline))
     res = np.append(res, [resline], axis=0)
+#%% Evaluation of last 5 jumps and Reinforcement Machine Learning Iteration
+    
+    def isMultiple(num,  check_with):
+        return num % check_with == 0;
+    if (isMultiple(inx, 5)==True) and (inx>0):
+        inx1 = inx - 1
+        inx2 = inx - 2
+        inx3 = inx - 3
+        inx4 = inx - 4
+        inx5 = inx - 5
+        jump1 = pred - res[inx1,0]
+        jump2 = res[inx1,0] - res[inx2,0]
+        jump3 = res[inx2,0] - res[inx3,0]
+        jump4 = res[inx3,0] - res[inx4,0]
+        jump5 = res[inx4,0] - res[inx5,0]
+        jumps = np.array([jump1, jump2, jump3, jump4, jump5])
+        absjumps = abs(jumps)
+        sumjumps = np.sum(jumps)
+        sumabsjumps = np.sum(absjumps)
+        jumplog = np.append(jumplog, sumabsjumps)
+        highthresh = 0.5
+        '''
+        if sumjumps > (highthresh*len(jumps)*maxjump):
+            setting -= 0.1
+            chnginx = np.append(chnginx, inx)
+        '''
+        #code that says if the jumps have increased, flip the direction we are iterating
+        
+        if len(jumplog)>2:
+            jumpdiff1 = jumplog[len(jumplog)-1] - jumplog[len(jumplog)-2]
+            jumpdiff2 = jumplog[len(jumplog)-2] - jumplog[len(jumplog)-3]
+            if jumpdiff1>0 and jumpdiff2>0:
+                declin ^= True
+        
+        if sumjumps < netabsfrac * sumabsjumps and setting >= 0.2 and declin == True:
+            setting -= 0.1
+            settinglog = np.append(settinglog, setting)
+            chnginx = np.append(chnginx, inx)
+        if sumjumps < netabsfrac * sumabsjumps and setting <= 0.8 and declin == False:
+            setting += 0.1
+            settinglog = np.append(settinglog, setting)
+            chnginx = np.append(chnginx, inx)
+        
+#%% response to temperature
+    if pred < heat:
+        heaterswitch = np.append(heaterswitch, 1)
+    if pred > heat:
+        heaterswitch = np.append(heaterswitch, 0)
     
     inx += 1
     print(inx)
@@ -503,7 +648,7 @@ plt.plot(time, res[:,0], label="Prediction")
 plt.xlabel('time (seconds)') # creates a label 'x' for the x-axis
 plt.ylabel('temperature (°C)') # creates a label 'y' for the y-axis
 plt.ylim(lbnd, upbnd)
-title = 'Array: 3 sensor Numerical Results, ' + svname + ': ' + sigfigdelta
+title = 'Array: 6 sensor Results, ' + svname + ': ' + sigfigdelta
 plt.title(title)
 plt.legend()
 plt.savefig(graphname, dpi=777)
@@ -574,5 +719,13 @@ plt.title(title)
 plt.legend()
 plt.savefig(graphnameav, dpi=777)
 plt.show()
+
+print("heating switch: ", heaterswitch)
+print("final setting = ", setting)
+print("change points: ", chnginx)
+print("jump log: ", jumplog)
+print("settings changes: ", settinglog)
+#print(datapnts)
+#print(len(heaterswitch))
 
         

@@ -12,10 +12,11 @@ import math as m
 from scipy.optimize import fsolve
 import csv
 import time
+import sys
 
 #%%
 #INPUT DATA FILE NAME HERE
-name = "ChangingHeatTest"
+name = "Control 1 random"
 fmt = ".csv"
 
 #INPUT DISPLACEMENTS AND TRACKSPEED HERE
@@ -30,15 +31,18 @@ guess2 = 25
 guess3 = 0.01
 
 #INPUT TOO HIGH OR TOO LOW BOUNDS FOR PREDICTION HERE
-upbnd = 100
-lbnd = 20
+upbnd = 70
+lbnd = 30
+
+#AND MAXMIMUM TOLERATED JUMP IN TEMPERATURE
+maxjump = 10
 #%%
 outputname = name + "results.csv"
 avoutname = name + "resultsavgd.csv"
 graphname = name + "graph.png"
 graphnameav = name + "graphavgd.png"
 
-raw = np.genfromtxt(name + fmt,dtype='float',delimiter=',',skip_header=0)
+raw = np.genfromtxt(name + fmt,dtype='float',delimiter=',',skip_header=2)
 #print(raw)
 
 temp1 = raw[:,0]
@@ -105,6 +109,7 @@ for v in vald:
         C = np.mean([temp3[inx], temp3[inx1], temp3[inx2], temp3[inx3], temp3[inx4]])
     '''
     #%%
+    
     #Solving attempt 1, guess on from previous values
     try:
         def eqs(x):
@@ -120,32 +125,37 @@ for v in vald:
         guess = solution
         solution = fsolve(eqs, guess)
         print("trial values solution [T_h, T_c, k]: ", solution)
+        fail = True
     except Exception:
         print("error: numerical solving 1")
-        pass
+        fail = True
+        
 #%%    
-    #attempt 2, guess from previous for Th, but fixed guesses for Tc & k
-    try:
-        def eqs(x):
-            Th = x[0]
-            Tc = x[1]
-            k = x[2]
-            f = Tc + (Th - Tc)*m.exp(-k*(a/v)) - A
-            g = Tc + (Th - Tc)*m.exp(-k*(b/v)) - B
-            h = Tc + (Th - Tc)*m.exp(-k*(c/v)) - C
-            
-            return [f, g, h]
-        guess = np.array([solution[0], guess2, guess3])
-        solution = fsolve(eqs, guess)
-        print("trial values retry1 solution [T_h, T_c, k]: ", solution)
-    except Exception:
-        print("error: numerical solving 2")
-        pass    
-    
+#Run 2, guess from previous for Th, but fixed guesses for Tc & k
+    if fail == True:
+        try:
+            def eqs(x):
+                Th = x[0]
+                Tc = x[1]
+                k = x[2]
+                f = Tc + (Th - Tc)*m.exp(-k*(a/v)) - A
+                g = Tc + (Th - Tc)*m.exp(-k*(b/v)) - B
+                h = Tc + (Th - Tc)*m.exp(-k*(c/v)) - C
+                
+                return [f, g, h]
+            guess = np.array([solution[0], guess2, guess3])
+            solution = fsolve(eqs, guess)
+            print("trial values retry1 solution [T_h, T_c, k]: ", solution)
+            fail = False
+        except Exception:
+            print("error: numerical solving 2")
+            fail = True
+            pass
+
 #%%
     #'''
-    #solving attempt 3, if value still to high or too low, try with fixed guess values
-    if solution[0]<lbnd or solution[0]>upbnd:
+    #solving attempt 3, try with fixed guess values
+    if fail == True:
         try:
             def eqs(x):
                 Th = x[0]
@@ -166,6 +176,43 @@ for v in vald:
         pass
     #'''
 
+#%%
+    
+    #reducing jumps in temperature to a certain max jump
+    inx1 = inx - 1
+    if inx > 0:
+        jump = solution[0] - res[inx1,0]
+        if abs(jump)>maxjump and abs(jump)<1000 and solution[0]<100 and solution[0]>20:
+            jumpreduce = True
+        else: jumpreduce = False
+        while abs(jump)>maxjump and abs(jump)<1000 and solution[0]<100 and solution[0]>20:
+            if jump>0:
+                solution[0] -= 1
+                jump = solution[0] - res[inx1,0]
+                print("jump reduce: ", jump)
+            if jump<0:
+                solution[0] += 1
+                jump = solution[0] - res[inx1,0]
+                print("jump reduce: ", jump)
+        if jumpreduce == True:
+            print("jump reduced Th: ", solution[0])
+    
+#%%
+#resetting anomalous values
+    inx1 = inx - 1   
+    '''
+    if solution[2]>10 or solution[2]<-10:
+        solution[2] = guess3
+        print("RESET K")
+
+    if solution[1]>100 or solution[1]<0:
+        solution[1] = guess2
+        print("RESET Tc")
+    '''
+    
+    if solution[0]>100 or solution[0]<20:
+        solution[0] = res[inx1,0]
+        print("RESET Th")
 #%%       
     #appending array
     pred = solution[0]
@@ -188,7 +235,7 @@ adeltas = abs(deltas)
 #print(adeltas)
 #fin = len(adeltas)+1
 avgdelta = np.mean(adeltas)
-print(avgdelta)
+#print(avgdelta)
 np.savetxt(outputname, res, delimiter = ',')
 
 #%%
@@ -197,9 +244,10 @@ time = np.linspace(0, 60, 120)
 plt.plot(time, res[:,1], label="Validation")
 plt.plot(time, res[:,0], label="Prediction")
 plt.ylim(lbnd, upbnd)
+plt.title('Numerical Algorithm ')
 plt.legend()
-plt.show()
 plt.savefig(graphname, dpi=600)
+plt.show()
 
 #%%
 #Predictions averaged out of the previous 2 values and current one
@@ -250,6 +298,7 @@ adeltas_smooth = abs(deltas_smooth)
 #print(adeltas)
 #fin = len(adeltas)+1
 avgdelta_smooth = np.mean(adeltas_smooth)
+print(avgdelta)
 print(avgdelta_smooth)
 np.savetxt(avoutname, res, delimiter = ',')
 
@@ -258,6 +307,7 @@ np.savetxt(avoutname, res, delimiter = ',')
 plt.plot(time, res[:,1], label="Validation")
 plt.plot(time, res[:,0], label="Prediction")
 plt.ylim(lbnd, upbnd)
+plt.title('Numerical Algorithm, Averaged') # gives the plot a title
 plt.savefig(graphnameav, dpi=600)
 plt.legend()
 plt.show()
